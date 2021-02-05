@@ -1,0 +1,17 @@
+{
+  "nav": {
+    "home": "HOME"
+  },
+  "languageAcronym": "EN",
+  "language": "ENGLISH",
+  "notFound": {
+    "title": "404",
+    "description": "Página Não Encontrada."
+  },
+  "home": {
+    "title": "AUTH"
+  },
+  "footer": {
+    "copyright": "AUTH. 2020 © Todos os direitos reservados — CNPJ: 39.514.176/0001-05"
+  }
+}

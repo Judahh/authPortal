@@ -1,0 +1,51 @@
+{
+  "nav": {
+    "home": "HOME"
+  },
+  "languageAcronym": "BR",
+  "language": "PORTUGUÊS-BR",
+  "notFound": {
+    "title": "404",
+    "description": "Page Not Found."
+  },
+  "home": {
+    "title": "AUTH",
+    "login": "LOGIN",
+    "googleLogin": "G LOGIN",
+    "logout": "LOGOUT",
+    "error": {
+      "general": "The form has errors, correct them to continue",
+      "specific": "An error has occurred:",
+      "email": "Your email is required",
+      "password": "Your password is required"
+    },
+    "messageSent": "Message sent.",
+    "inputPassword": "PASSWORD",
+    "inputEmail": "EMAIL"
+  },
+  "signUp": {
+    "title": "SIGN UP",
+    "signedUp": "SIGNED UP",
+    "signUp": "SIGN UP",
+    "googleSignUp": "G SIGN UP",
+    "googleSignOut": "G SIGN OUT",
+    "error": {
+      "general": "The form has errors, correct them to continue",
+      "specific": "An error has occurred:",
+      "name": "Your name is required",
+      "email": "Your email is required",
+      "gmail": "Your gmail is required",
+      "password": "Your password is required"
+    },
+    "messageSent": "Message sent.",
+    "inputName": "NAME",
+    "inputGivenName": "NAME",
+    "inputFamilyName": "FAMILY NAME",
+    "inputGmail": "GMAIL",
+    "inputPassword": "PASSWORD",
+    "inputEmail": "EMAIL"
+  },
+  "footer": {
+    "copyright": "AUTH. 2020 © All rights reserved — CNPJ: 39.514.176/0001-05"
+  }
+}
