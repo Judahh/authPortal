@@ -1239,7 +1239,9 @@ class StrategyHandler_StrategyHandler {
      * - cacheDidUpdate()
      *
      * @param {Request|string} key The request or URL to use as the cache key.
-     * @param {Promise<void>} response The response to cache.
+     * @param {Response} response The response to cache.
+     * @return {Promise<boolean>} `false` if a cacheWillUpdate caused the response
+     * not be cached, and `true` otherwise.
      */
     async cachePut(key, response) {
         const request = toRequest(key);
@@ -1257,7 +1259,7 @@ class StrategyHandler_StrategyHandler {
         const responseToCache = await this._ensureResponseSafeToCache(response);
         if (!responseToCache) {
             if (false) {}
-            return;
+            return false;
         }
         const { cacheName, matchOptions } = this._strategy;
         const cache = await self.caches.open(cacheName);
@@ -1289,6 +1291,7 @@ class StrategyHandler_StrategyHandler {
                 event: this.event,
             });
         }
+        return true;
     }
     /**
      * Checks the list of plugins for the `cacheKeyWillBeUsed` callback, and
@@ -1688,11 +1691,6 @@ class Strategy_Strategy {
 
 
 
-const copyRedirectedCacheableResponsesPlugin = {
-    async cacheWillUpdate({ response }) {
-        return response.redirected ? await copyResponse(response) : response;
-    }
-};
 /**
  * A [Strategy]{@link module:workbox-strategies.Strategy} implementation
  * specifically designed to work with
@@ -1731,7 +1729,7 @@ class PrecacheStrategy_PrecacheStrategy extends Strategy_Strategy {
         // any redirected response must be "copied" rather than cloned, so the new
         // response doesn't contain the `redirected` flag. See:
         // https://bugs.chromium.org/p/chromium/issues/detail?id=669363&desc=2#c1
-        this.plugins.push(copyRedirectedCacheableResponsesPlugin);
+        this.plugins.push(PrecacheStrategy_PrecacheStrategy.copyRedirectedCacheableResponsesPlugin);
     }
     /**
      * @private
@@ -1773,17 +1771,12 @@ class PrecacheStrategy_PrecacheStrategy extends Strategy_Strategy {
         return response;
     }
     async _handleInstall(request, handler) {
-        const response = await handler.fetchAndCachePut(request);
-        // Any time there's no response, consider it a precaching error.
-        let responseSafeToPrecache = Boolean(response);
-        // Also consider it an error if the user didn't pass their own
-        // cacheWillUpdate plugin, and the response is a 400+ (note: this means
-        // that by default opaque responses can be precached).
-        if (response && response.status >= 400 &&
-            !this._usesCustomCacheableResponseLogic()) {
-            responseSafeToPrecache = false;
-        }
-        if (!responseSafeToPrecache) {
+        this._useDefaultCacheabilityPluginIfNeeded();
+        const response = await handler.fetch(request);
+        // Make sure we defer cachePut() until after we know the response
+        // should be cached; see https://github.com/GoogleChrome/workbox/issues/2737
+        const wasCached = await handler.cachePut(request, response.clone());
+        if (!wasCached) {
             // Throwing here will lead to the `install` handler failing, which
             // we want to do if *any* of the responses aren't safe to cache.
             throw new WorkboxError_WorkboxError('bad-precaching-response', {
@@ -1794,21 +1787,71 @@ class PrecacheStrategy_PrecacheStrategy extends Strategy_Strategy {
         return response;
     }
     /**
-     * Returns true if any users plugins were added containing their own
-     * `cacheWillUpdate` callback.
+     * This method is complex, as there a number of things to account for:
      *
-     * This method indicates whether the default cacheable response logic (i.e.
-     * <400, including opaque responses) should be used. If a custom plugin
-     * with a `cacheWillUpdate` callback is passed, then the strategy should
-     * defer to that plugin's logic.
+     * The `plugins` array can be set at construction, and/or it might be added to
+     * to at any time before the strategy is used.
+     *
+     * At the time the strategy is used (i.e. during an `install` event), there
+     * needs to be at least one plugin that implements `cacheWillUpdate` in the
+     * array, other than `copyRedirectedCacheableResponsesPlugin`.
+     *
+     * - If this method is called and there are no suitable `cacheWillUpdate`
+     * plugins, we need to add `defaultPrecacheCacheabilityPlugin`.
+     *
+     * - If this method is called and there is exactly one `cacheWillUpdate`, then
+     * we don't have to do anything (this might be a previously added
+     * `defaultPrecacheCacheabilityPlugin`, or it might be a custom plugin).
+     *
+     * - If this method is called and there is more than one `cacheWillUpdate`,
+     * then we need to check if one is `defaultPrecacheCacheabilityPlugin`. If so,
+     * we need to remove it. (This situation is unlikely, but it could happen if
+     * the strategy is used multiple times, the first without a `cacheWillUpdate`,
+     * and then later on after manually adding a custom `cacheWillUpdate`.)
+     *
+     * See https://github.com/GoogleChrome/workbox/issues/2737 for more context.
      *
      * @private
      */
-    _usesCustomCacheableResponseLogic() {
-        return this.plugins.some((plugin) => plugin.cacheWillUpdate &&
-            plugin !== copyRedirectedCacheableResponsesPlugin);
+    _useDefaultCacheabilityPluginIfNeeded() {
+        let defaultPluginIndex = null;
+        let cacheWillUpdatePluginCount = 0;
+        for (const [index, plugin] of this.plugins.entries()) {
+            // Ignore the copy redirected plugin when determining what to do.
+            if (plugin === PrecacheStrategy_PrecacheStrategy.copyRedirectedCacheableResponsesPlugin) {
+                continue;
+            }
+            // Save the default plugin's index, in case it needs to be removed.
+            if (plugin === PrecacheStrategy_PrecacheStrategy.defaultPrecacheCacheabilityPlugin) {
+                defaultPluginIndex = index;
+            }
+            if (plugin.cacheWillUpdate) {
+                cacheWillUpdatePluginCount++;
+            }
+        }
+        if (cacheWillUpdatePluginCount === 0) {
+            this.plugins.push(PrecacheStrategy_PrecacheStrategy.defaultPrecacheCacheabilityPlugin);
+        }
+        else if (cacheWillUpdatePluginCount > 1 && defaultPluginIndex !== null) {
+            // Only remove the default plugin; multiple custom plugins are allowed.
+            this.plugins.splice(defaultPluginIndex, 1);
+        }
+        // Nothing needs to be done if cacheWillUpdatePluginCount is 1
     }
 }
+PrecacheStrategy_PrecacheStrategy.defaultPrecacheCacheabilityPlugin = {
+    async cacheWillUpdate({ response }) {
+        if (!response || response.status >= 400) {
+            return null;
+        }
+        return response;
+    }
+};
+PrecacheStrategy_PrecacheStrategy.copyRedirectedCacheableResponsesPlugin = {
+    async cacheWillUpdate({ response }) {
+        return response.redirected ? await copyResponse(response) : response;
+    }
+};
 
 
 // CONCATENATED MODULE: ./node_modules/workbox-precaching/PrecacheController.js
@@ -2233,6 +2276,14 @@ class Route_Route {
         this.match = match;
         this.method = method;
     }
+    /**
+     *
+     * @param {module:workbox-routing-handlerCallback} handler A callback
+     * function that returns a Promise resolving to a Response
+     */
+    setCatchHandler(handler) {
+        this.catchHandler = normalizeHandler(handler);
+    }
 }
 
 
@@ -2460,10 +2511,25 @@ class Router_Router {
         catch (err) {
             responsePromise = Promise.reject(err);
         }
-        if (responsePromise instanceof Promise && this._catchHandler) {
-            responsePromise = responsePromise.catch((err) => {
-                if (false) {}
-                return this._catchHandler.handle({ url, request, event });
+        // Get route's catch handler, if it exists
+        const catchHandler = route && route.catchHandler;
+        if (responsePromise instanceof Promise && (this._catchHandler || catchHandler)) {
+            responsePromise = responsePromise.catch(async (err) => {
+                // If there's a route catch handler, process that first
+                if (catchHandler) {
+                    if (false) {}
+                    try {
+                        return await catchHandler.handle({ url, request, event, params });
+                    }
+                    catch (catchErr) {
+                        err = catchErr;
+                    }
+                }
+                if (this._catchHandler) {
+                    if (false) {}
+                    return this._catchHandler.handle({ url, request, event });
+                }
+                throw err;
             });
         }
         return responsePromise;
@@ -3161,7 +3227,7 @@ class PrecacheFallbackPlugin_PrecacheFallbackPlugin {
  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
 
-precacheAndRoute([{'revision':null,'url':'/_next/static/chunks/13.73b29934949ab029aed8.js'},{'revision':null,'url':'/_next/static/chunks/81a130b6eb887c0b09e7b88e76f8017455c6684e.8b4be066ea29648dab8a.js'},{'revision':null,'url':'/_next/static/chunks/ab6699b52d2ee771d8d098fa992ec0d26f4758a9.49ec10e7c13e1c885718.js'},{'revision':null,'url':'/_next/static/chunks/bc8549082f350081ba58227592d8ecf01a807a0e.2c8fb1869ac01267abd9.js'},{'revision':null,'url':'/_next/static/chunks/f6078781a05fe1bcb0902d23dbbb2662c8d200b3.6d66190da45ac124e73d.js'},{'revision':null,'url':'/_next/static/chunks/framework.abffcf18e526b7c0dbcd.js'},{'revision':null,'url':'/_next/static/chunks/main-8ef8cee1a4a865c125db.js'},{'revision':null,'url':'/_next/static/chunks/pages/404-2f8a4f70cac6b1be758d.js'},{'revision':null,'url':'/_next/static/chunks/pages/_app-4440eeb0b86d669afc25.js'},{'revision':null,'url':'/_next/static/chunks/pages/_error-e2b0d0121dc9b5c4d3ac.js'},{'revision':null,'url':'/_next/static/chunks/pages/index-32dea13fad5ae876c508.js'},{'revision':null,'url':'/_next/static/chunks/pages/signUp-67010cdc3362d6c856f4.js'},{'revision':null,'url':'/_next/static/chunks/polyfills-483e9e96b8aec87b069a.js'},{'revision':null,'url':'/_next/static/chunks/webpack-a878e54ca7e989ccae88.js'},{'revision':null,'url':'/_next/static/css/e8bcc7d74d86e0765cf4.css'},{'revision':null,'url':'/_next/static/my3uhElkwwvRFfb1a94Lc/_buildManifest.js'},{'revision':null,'url':'/_next/static/my3uhElkwwvRFfb1a94Lc/_ssgManifest.js'},{'revision':'c87b3ef459c3d9e2ca89a7ce214ea64d','url':'/android-chrome-192x192.png'},{'revision':'efa98c7406efc5721bade2c73ffb7ec5','url':'/android-chrome-512x512.png'},{'revision':'875608d0dc40d89e9b48b94e82489103','url':'/apple-touch-icon.png'},{'revision':'c86804fcb5629d4b5d5e8099439d9b7f','url':'/favicon-16x16.png'},{'revision':'0cbcefe245f1bdfed30f1b48f8351ce6','url':'/favicon-32x32.png'},{'revision':'412192267449ea67eebabd3e62acfe51','url':'/favicon.ico'},{'revision':'06621678aa40c252ae84f048789fd9a1','url':'/fonts/Acid/acid.otf'},{'revision':'978ed0c277a46a2bc5420624a1c123b1','url':'/fonts/Acid/acid_bold.otf'},{'revision':'ab5b34b8579c447e67964046ac295a8d','url':'/fonts/Acid/acid_bold_italic.otf'},{'revision':'2e81a7b3650bf155f16ae804a01d545b','url':'/fonts/Acid/acid_italic.otf'},{'revision':'3b558c7caa9a07a59c44792a51d406c3','url':'/fonts/Acid/acid_medium.otf'},{'revision':'2f823e5e96e90514d841d5b75b0b3c84','url':'/fonts/Acid/acid_medium_italic.otf'},{'revision':'e32c5e7c6ab38f989a80143452f54c30','url':'/fonts/EdelSans-Light.ttf'},{'revision':'edb91eee769f386c528c0791768e30ab','url':'/fonts/FuturaND/FuturaND-Bold.ttf'},{'revision':'5c62839818026814677ac1fceea3a2c5','url':'/fonts/FuturaND/FuturaND-BoldOblique.ttf'},{'revision':'33d565a189793e73d1d6feca9d890aa2','url':'/fonts/FuturaND/FuturaND-Medium.ttf'},{'revision':'b07fcb2d0d6bc2bdaaae2ff3b7368175','url':'/fonts/FuturaND/FuturaND-MediumOblique.ttf'},{'revision':'13f4f01e281a00b81463fed43e6dd0f5','url':'/fonts/FuturaND/FuturaNDBook-Oblique.ttf'},{'revision':'b76cb9bb215a4abc00fa22a3f26bd206','url':'/fonts/FuturaND/FuturaNDBook.ttf'},{'revision':'a6cf537a534ab99db144191dc62cb248','url':'/fonts/FuturaND/FuturaNDBookSCOsF-Oblique.ttf'},{'revision':'8e259a300963a04523f7d7eb3191b688','url':'/fonts/FuturaND/FuturaNDBookSCOsF.ttf'},{'revision':'357f47ad01eac8f49f2a4ae8f7d690ae','url':'/fonts/FuturaND/FuturaNDCn-Bold.ttf'},{'revision':'b0727fca863ecfdd34f928f67d90351e','url':'/fonts/FuturaND/FuturaNDCn-BoldOblique.ttf'},{'revision':'e29c176e0fb61a2c4f2eee778e3df066','url':'/fonts/FuturaND/FuturaNDCn-Medium.ttf'},{'revision':'4179b95f8905100b514f0b07c9a8ae04','url':'/fonts/FuturaND/FuturaNDCn-MediumOblique.ttf'},{'revision':'2a9cee1e3b5b3a2ef6563fdf56a3d076','url':'/fonts/FuturaND/FuturaNDCnExtrabold-Oblique.ttf'},{'revision':'86eae3f586738d3273b40345cb623f81','url':'/fonts/FuturaND/FuturaNDCnExtrabold.ttf'},{'revision':'f77ea531257c2e2b8c2bf40a79c479ae','url':'/fonts/FuturaND/FuturaNDCnLight-Oblique.ttf'},{'revision':'8ef1105ca6a661b4eb664c6e301892bd','url':'/fonts/FuturaND/FuturaNDCnLight.ttf'},{'revision':'5ad4416651870d95b1496a783643a8cb','url':'/fonts/FuturaND/FuturaNDCnLightSCOsF-Oblique.ttf'},{'revision':'8c6dfb6cdb9d6883e187f490a9944b3b','url':'/fonts/FuturaND/FuturaNDCnLightSCOsF.ttf'},{'revision':'88b279df1dee42ac62319370fbcafe5d','url':'/fonts/FuturaND/FuturaNDCnSCOsF-Bold.ttf'},{'revision':'f221dfd151a7aa61955f0d3ca4697f62','url':'/fonts/FuturaND/FuturaNDCnSCOsF-Medium.ttf'},{'revision':'385e5b217f4a1662cccddef3580de8e1','url':'/fonts/FuturaND/FuturaNDCnSCOsF-MediumOblique.ttf'},{'revision':'579ba9bddf872b60f4ddbd1a2e3595e3','url':'/fonts/FuturaND/FuturaNDDemibold-Oblique.ttf'},{'revision':'5ac1794d3a56086e91cca93857e5f2c3','url':'/fonts/FuturaND/FuturaNDDemibold.ttf'},{'revision':'6400537b5593de85645b831d269dd2c9','url':'/fonts/FuturaND/FuturaNDExtraBold-Oblique.ttf'},{'revision':'c66b2f25c02bd51c388fcf6e7c680eb9','url':'/fonts/FuturaND/FuturaNDExtraBold.ttf'},{'revision':'c90375f55a87c1ff9bf9578cc11f5fcd','url':'/fonts/FuturaND/FuturaNDLight-Oblique.ttf'},{'revision':'003e46563c45b423e7fffb588761a518','url':'/fonts/FuturaND/FuturaNDLight.ttf'},{'revision':'7695c46e7a6d2c98019e9095037987bd','url':'/fonts/FuturaND/FuturaNDLightSCOsF-Oblique.ttf'},{'revision':'e045e2f1d4e3e4f1b74882e02adbd20b','url':'/fonts/FuturaND/FuturaNDLightSCOsF.ttf'},{'revision':'df5796a3ecad424bdd85648c55cddab3','url':'/fonts/FuturaND/FuturaNDSCOsF-Bold.ttf'},{'revision':'197dc1b5a7a6e66f4144fe470d2f2600','url':'/fonts/FuturaND/FuturaNDSCOsF-BoldOblique.ttf'},{'revision':'346022662ae876d5690fb8d7e4d7fb13','url':'/fonts/FuturaND/FuturaNDSCOsF-Medium.ttf'},{'revision':'ccfb4a232c0311ab7211a5330b6b36df','url':'/fonts/FuturaND/FuturaNDSCOsF-MediumOblique.ttf'},{'revision':'ae325fd5308bb66ce9b814527dde29a6','url':'/fonts/Great_Vibes/GreatVibes-Regular.ttf'},{'revision':'a45c99c4385f03c8320f72773f715c61','url':'/fonts/Great_Vibes/OFL.txt'},{'revision':'c91618f5292a1cba5ec928813925d79d','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBk.woff'},{'revision':'0decc09ecddcb2077950e32b27d3650d','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkCn.woff'},{'revision':'c4d6cf2d2e7aefa3f2ea06a715cf8013','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkCnObl.woff'},{'revision':'69e0e3ee0efd4a46f2716eba3a9a8c87','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkObl.woff'},{'revision':'f26658aa77843cc49fa40d5399e386d3','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBold.woff'},{'revision':'0190cd415011ca2da16f1e1b239040cb','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldCn.woff'},{'revision':'3d253ca521cc438cc606199287151b9e','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldCnObl.woff'},{'revision':'fde7dc7f298a00a3895f17d30d9f194c','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldObl.woff'},{'revision':'ac1e04f45faa477814b82801c66ab3e6','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemi.woff'},{'revision':'543982e0325c4e60f5cab1d7163f1d66','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiCn.woff'},{'revision':'bd8aa8fef256db93ca91bd92376f2443','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiCnObl.woff'},{'revision':'5fa8e0ed43b0e2ed740ae65516958d7f','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiObl.woff'},{'revision':'295c1fc0a5f0cce53f825db573a8f9d7','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMd.woff'},{'revision':'2ad99758f4fcb59e0a178844f83e23f1','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdCn.woff'},{'revision':'17f121bd7477401ac2bb6843f3965db5','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdCnObl.woff'},{'revision':'3d33b1e0736476ef881189c43da13c58','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdObl.woff'},{'revision':'eeafd2ef20b68fa94a910e90a550b5fc','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLt.otf'},{'revision':'a4e733a63c487423308aff40c7c31bfc','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLt.woff'},{'revision':'a4e7b709e226f4560f45849127f0cc17','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtCn.woff'},{'revision':'5eb93d61402a7616e2f9aabc320fab6b','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtCnObl.woff'},{'revision':'64fb68bf63eed941300b7b97a11a8e32','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtObl.woff'},{'revision':'3640795b0283b7d09b77f68856c46de9','url':'/fonts/Metrophobic-Regular.ttf'},{'revision':'a6c501958d8e59f793ef099b59abedc3','url':'/fonts/Spartan/Spartan-Black.ttf'},{'revision':'400181c2d9edb6319b81af6caf21b448','url':'/fonts/Spartan/Spartan-Bold.ttf'},{'revision':'bd9948caf0d835b557a7c159f5294c99','url':'/fonts/Spartan/Spartan-ExtraBold.ttf'},{'revision':'dc7a8393b5b5509295f780eb94fcedd7','url':'/fonts/Spartan/Spartan-ExtraLight.ttf'},{'revision':'0f335311ae3a6169a3a2d51555c0e10a','url':'/fonts/Spartan/Spartan-Light.ttf'},{'revision':'fbd7c491ed8d0c32edccb1402b434fc4','url':'/fonts/Spartan/Spartan-Medium.ttf'},{'revision':'b1e7fafdf6562bc11935370db0b81e26','url':'/fonts/Spartan/Spartan-Regular.ttf'},{'revision':'e3510da32f64ccc0f31f6834e690b7be','url':'/fonts/Spartan/Spartan-SemiBold.ttf'},{'revision':'dcb83808abc4ba6f5934e6415b17ee73','url':'/fonts/Spartan/Spartan-Thin.ttf'},{'revision':'2917f92e44cf46f2225e574fb1862596','url':'/fonts/Spartan/Spartan-VariableFont_wght.ttf'},{'revision':'d189a8890669349d86902725bd812406','url':'/img/JL.svg'},{'revision':'d55e1ef6572e59290906e14db1ea73a8','url':'/img/JLInvert.svg'},{'revision':'1d43c7dd8cc34f07acffaeb7c1beed3d','url':'/img/JLWithBorder.svg'},{'revision':'360ba197de3b6c7b4a09741c11b758ad','url':'/img/coffee.svg'},{'revision':'5cd87c30b527508ffbc70dff41b7cf31','url':'/img/home.jpg'},{'revision':'797b9f47c606906ba63670e383c9baf0','url':'/img/home.svg'},{'revision':'1bd7f725b0ba09ba31ec761f1f29301f','url':'/img/home2.jpg'},{'revision':'e62b6a2aa415fc2e695e4c943e68ad68','url':'/img/home2.svg'},{'revision':'db5c2fd5862f9b742d42f98264e1f3be','url':'/img/moon.svg'},{'revision':'712cc737aed0a0e6e017ad87a5beca21','url':'/img/sun.svg'},{'revision':'688128be216cc2f753fe641590f2fcd3','url':'/manifest.json'},{'revision':'2349a00230d690b9168e9ccfcb294a08','url':'/maskable_icon-512x512.png'},{'revision':'15482ee3f89b16155def523407fa5dea','url':'/mstile-150x150.png'},{'revision':'8d3b492754aa60e19fc9af67d250b55c','url':'/safari-pinned-tab.svg'},{'revision':'7a7a9fab4ca3224cad19254b6aba0be3','url':'/sw.js'}]);
+precacheAndRoute([{'revision':null,'url':'/_next/static/chunks/13.36e7f266b640fc4cfb32.js'},{'revision':null,'url':'/_next/static/chunks/81a130b6eb887c0b09e7b88e76f8017455c6684e.0c1204f73a6f64adb848.js'},{'revision':null,'url':'/_next/static/chunks/ab6699b52d2ee771d8d098fa992ec0d26f4758a9.49ec10e7c13e1c885718.js'},{'revision':null,'url':'/_next/static/chunks/bc8549082f350081ba58227592d8ecf01a807a0e.765cd78e3030850d1279.js'},{'revision':null,'url':'/_next/static/chunks/f6078781a05fe1bcb0902d23dbbb2662c8d200b3.96afb1fc973cf41220d2.js'},{'revision':null,'url':'/_next/static/chunks/framework.abffcf18e526b7c0dbcd.js'},{'revision':null,'url':'/_next/static/chunks/main-8b2a482b1a5accd3322a.js'},{'revision':null,'url':'/_next/static/chunks/pages/404-2f8a4f70cac6b1be758d.js'},{'revision':null,'url':'/_next/static/chunks/pages/_app-56cd91d3a06d69442326.js'},{'revision':null,'url':'/_next/static/chunks/pages/_error-08089dcd9852d720884b.js'},{'revision':null,'url':'/_next/static/chunks/pages/index-b2d19eb4e2dba756aeda.js'},{'revision':null,'url':'/_next/static/chunks/pages/signUp-70d61017fca6b4fc67ca.js'},{'revision':null,'url':'/_next/static/chunks/polyfills-ff94e68042added27a93.js'},{'revision':null,'url':'/_next/static/chunks/webpack-74334ff268e6123848d3.js'},{'revision':null,'url':'/_next/static/css/a747e6f315ccdc249aab.css'},{'revision':null,'url':'/_next/static/iNbFCSokM6PeKWPbLE-hV/_buildManifest.js'},{'revision':null,'url':'/_next/static/iNbFCSokM6PeKWPbLE-hV/_ssgManifest.js'},{'revision':'c87b3ef459c3d9e2ca89a7ce214ea64d','url':'/android-chrome-192x192.png'},{'revision':'efa98c7406efc5721bade2c73ffb7ec5','url':'/android-chrome-512x512.png'},{'revision':'875608d0dc40d89e9b48b94e82489103','url':'/apple-touch-icon.png'},{'revision':'c86804fcb5629d4b5d5e8099439d9b7f','url':'/favicon-16x16.png'},{'revision':'0cbcefe245f1bdfed30f1b48f8351ce6','url':'/favicon-32x32.png'},{'revision':'412192267449ea67eebabd3e62acfe51','url':'/favicon.ico'},{'revision':'06621678aa40c252ae84f048789fd9a1','url':'/fonts/Acid/acid.otf'},{'revision':'978ed0c277a46a2bc5420624a1c123b1','url':'/fonts/Acid/acid_bold.otf'},{'revision':'ab5b34b8579c447e67964046ac295a8d','url':'/fonts/Acid/acid_bold_italic.otf'},{'revision':'2e81a7b3650bf155f16ae804a01d545b','url':'/fonts/Acid/acid_italic.otf'},{'revision':'3b558c7caa9a07a59c44792a51d406c3','url':'/fonts/Acid/acid_medium.otf'},{'revision':'2f823e5e96e90514d841d5b75b0b3c84','url':'/fonts/Acid/acid_medium_italic.otf'},{'revision':'e32c5e7c6ab38f989a80143452f54c30','url':'/fonts/EdelSans-Light.ttf'},{'revision':'edb91eee769f386c528c0791768e30ab','url':'/fonts/FuturaND/FuturaND-Bold.ttf'},{'revision':'5c62839818026814677ac1fceea3a2c5','url':'/fonts/FuturaND/FuturaND-BoldOblique.ttf'},{'revision':'33d565a189793e73d1d6feca9d890aa2','url':'/fonts/FuturaND/FuturaND-Medium.ttf'},{'revision':'b07fcb2d0d6bc2bdaaae2ff3b7368175','url':'/fonts/FuturaND/FuturaND-MediumOblique.ttf'},{'revision':'13f4f01e281a00b81463fed43e6dd0f5','url':'/fonts/FuturaND/FuturaNDBook-Oblique.ttf'},{'revision':'b76cb9bb215a4abc00fa22a3f26bd206','url':'/fonts/FuturaND/FuturaNDBook.ttf'},{'revision':'a6cf537a534ab99db144191dc62cb248','url':'/fonts/FuturaND/FuturaNDBookSCOsF-Oblique.ttf'},{'revision':'8e259a300963a04523f7d7eb3191b688','url':'/fonts/FuturaND/FuturaNDBookSCOsF.ttf'},{'revision':'357f47ad01eac8f49f2a4ae8f7d690ae','url':'/fonts/FuturaND/FuturaNDCn-Bold.ttf'},{'revision':'b0727fca863ecfdd34f928f67d90351e','url':'/fonts/FuturaND/FuturaNDCn-BoldOblique.ttf'},{'revision':'e29c176e0fb61a2c4f2eee778e3df066','url':'/fonts/FuturaND/FuturaNDCn-Medium.ttf'},{'revision':'4179b95f8905100b514f0b07c9a8ae04','url':'/fonts/FuturaND/FuturaNDCn-MediumOblique.ttf'},{'revision':'2a9cee1e3b5b3a2ef6563fdf56a3d076','url':'/fonts/FuturaND/FuturaNDCnExtrabold-Oblique.ttf'},{'revision':'86eae3f586738d3273b40345cb623f81','url':'/fonts/FuturaND/FuturaNDCnExtrabold.ttf'},{'revision':'f77ea531257c2e2b8c2bf40a79c479ae','url':'/fonts/FuturaND/FuturaNDCnLight-Oblique.ttf'},{'revision':'8ef1105ca6a661b4eb664c6e301892bd','url':'/fonts/FuturaND/FuturaNDCnLight.ttf'},{'revision':'5ad4416651870d95b1496a783643a8cb','url':'/fonts/FuturaND/FuturaNDCnLightSCOsF-Oblique.ttf'},{'revision':'8c6dfb6cdb9d6883e187f490a9944b3b','url':'/fonts/FuturaND/FuturaNDCnLightSCOsF.ttf'},{'revision':'88b279df1dee42ac62319370fbcafe5d','url':'/fonts/FuturaND/FuturaNDCnSCOsF-Bold.ttf'},{'revision':'f221dfd151a7aa61955f0d3ca4697f62','url':'/fonts/FuturaND/FuturaNDCnSCOsF-Medium.ttf'},{'revision':'385e5b217f4a1662cccddef3580de8e1','url':'/fonts/FuturaND/FuturaNDCnSCOsF-MediumOblique.ttf'},{'revision':'579ba9bddf872b60f4ddbd1a2e3595e3','url':'/fonts/FuturaND/FuturaNDDemibold-Oblique.ttf'},{'revision':'5ac1794d3a56086e91cca93857e5f2c3','url':'/fonts/FuturaND/FuturaNDDemibold.ttf'},{'revision':'6400537b5593de85645b831d269dd2c9','url':'/fonts/FuturaND/FuturaNDExtraBold-Oblique.ttf'},{'revision':'c66b2f25c02bd51c388fcf6e7c680eb9','url':'/fonts/FuturaND/FuturaNDExtraBold.ttf'},{'revision':'c90375f55a87c1ff9bf9578cc11f5fcd','url':'/fonts/FuturaND/FuturaNDLight-Oblique.ttf'},{'revision':'003e46563c45b423e7fffb588761a518','url':'/fonts/FuturaND/FuturaNDLight.ttf'},{'revision':'7695c46e7a6d2c98019e9095037987bd','url':'/fonts/FuturaND/FuturaNDLightSCOsF-Oblique.ttf'},{'revision':'e045e2f1d4e3e4f1b74882e02adbd20b','url':'/fonts/FuturaND/FuturaNDLightSCOsF.ttf'},{'revision':'df5796a3ecad424bdd85648c55cddab3','url':'/fonts/FuturaND/FuturaNDSCOsF-Bold.ttf'},{'revision':'197dc1b5a7a6e66f4144fe470d2f2600','url':'/fonts/FuturaND/FuturaNDSCOsF-BoldOblique.ttf'},{'revision':'346022662ae876d5690fb8d7e4d7fb13','url':'/fonts/FuturaND/FuturaNDSCOsF-Medium.ttf'},{'revision':'ccfb4a232c0311ab7211a5330b6b36df','url':'/fonts/FuturaND/FuturaNDSCOsF-MediumOblique.ttf'},{'revision':'ae325fd5308bb66ce9b814527dde29a6','url':'/fonts/Great_Vibes/GreatVibes-Regular.ttf'},{'revision':'a45c99c4385f03c8320f72773f715c61','url':'/fonts/Great_Vibes/OFL.txt'},{'revision':'c91618f5292a1cba5ec928813925d79d','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBk.woff'},{'revision':'0decc09ecddcb2077950e32b27d3650d','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkCn.woff'},{'revision':'c4d6cf2d2e7aefa3f2ea06a715cf8013','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkCnObl.woff'},{'revision':'69e0e3ee0efd4a46f2716eba3a9a8c87','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBkObl.woff'},{'revision':'f26658aa77843cc49fa40d5399e386d3','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBold.woff'},{'revision':'0190cd415011ca2da16f1e1b239040cb','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldCn.woff'},{'revision':'3d253ca521cc438cc606199287151b9e','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldCnObl.woff'},{'revision':'fde7dc7f298a00a3895f17d30d9f194c','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdBoldObl.woff'},{'revision':'ac1e04f45faa477814b82801c66ab3e6','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemi.woff'},{'revision':'543982e0325c4e60f5cab1d7163f1d66','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiCn.woff'},{'revision':'bd8aa8fef256db93ca91bd92376f2443','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiCnObl.woff'},{'revision':'5fa8e0ed43b0e2ed740ae65516958d7f','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdDemiObl.woff'},{'revision':'295c1fc0a5f0cce53f825db573a8f9d7','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMd.woff'},{'revision':'2ad99758f4fcb59e0a178844f83e23f1','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdCn.woff'},{'revision':'17f121bd7477401ac2bb6843f3965db5','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdCnObl.woff'},{'revision':'3d33b1e0736476ef881189c43da13c58','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdMdObl.woff'},{'revision':'eeafd2ef20b68fa94a910e90a550b5fc','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLt.otf'},{'revision':'a4e733a63c487423308aff40c7c31bfc','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLt.woff'},{'revision':'a4e7b709e226f4560f45849127f0cc17','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtCn.woff'},{'revision':'5eb93d61402a7616e2f9aabc320fab6b','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtCnObl.woff'},{'revision':'64fb68bf63eed941300b7b97a11a8e32','url':'/fonts/ITCAvantGardeGothic/ITCAvantGardeStdXLtObl.woff'},{'revision':'3640795b0283b7d09b77f68856c46de9','url':'/fonts/Metrophobic-Regular.ttf'},{'revision':'a6c501958d8e59f793ef099b59abedc3','url':'/fonts/Spartan/Spartan-Black.ttf'},{'revision':'400181c2d9edb6319b81af6caf21b448','url':'/fonts/Spartan/Spartan-Bold.ttf'},{'revision':'bd9948caf0d835b557a7c159f5294c99','url':'/fonts/Spartan/Spartan-ExtraBold.ttf'},{'revision':'dc7a8393b5b5509295f780eb94fcedd7','url':'/fonts/Spartan/Spartan-ExtraLight.ttf'},{'revision':'0f335311ae3a6169a3a2d51555c0e10a','url':'/fonts/Spartan/Spartan-Light.ttf'},{'revision':'fbd7c491ed8d0c32edccb1402b434fc4','url':'/fonts/Spartan/Spartan-Medium.ttf'},{'revision':'b1e7fafdf6562bc11935370db0b81e26','url':'/fonts/Spartan/Spartan-Regular.ttf'},{'revision':'e3510da32f64ccc0f31f6834e690b7be','url':'/fonts/Spartan/Spartan-SemiBold.ttf'},{'revision':'dcb83808abc4ba6f5934e6415b17ee73','url':'/fonts/Spartan/Spartan-Thin.ttf'},{'revision':'2917f92e44cf46f2225e574fb1862596','url':'/fonts/Spartan/Spartan-VariableFont_wght.ttf'},{'revision':'d189a8890669349d86902725bd812406','url':'/img/JL.svg'},{'revision':'d55e1ef6572e59290906e14db1ea73a8','url':'/img/JLInvert.svg'},{'revision':'1d43c7dd8cc34f07acffaeb7c1beed3d','url':'/img/JLWithBorder.svg'},{'revision':'360ba197de3b6c7b4a09741c11b758ad','url':'/img/coffee.svg'},{'revision':'5cd87c30b527508ffbc70dff41b7cf31','url':'/img/home.jpg'},{'revision':'797b9f47c606906ba63670e383c9baf0','url':'/img/home.svg'},{'revision':'1bd7f725b0ba09ba31ec761f1f29301f','url':'/img/home2.jpg'},{'revision':'e62b6a2aa415fc2e695e4c943e68ad68','url':'/img/home2.svg'},{'revision':'db5c2fd5862f9b742d42f98264e1f3be','url':'/img/moon.svg'},{'revision':'712cc737aed0a0e6e017ad87a5beca21','url':'/img/sun.svg'},{'revision':'688128be216cc2f753fe641590f2fcd3','url':'/manifest.json'},{'revision':'2349a00230d690b9168e9ccfcb294a08','url':'/maskable_icon-512x512.png'},{'revision':'15482ee3f89b16155def523407fa5dea','url':'/mstile-150x150.png'},{'revision':'8d3b492754aa60e19fc9af67d250b55c','url':'/safari-pinned-tab.svg'},{'revision':'7a7a9fab4ca3224cad19254b6aba0be3','url':'/sw.js'}]);
 
 /***/ }),
 
@@ -3172,7 +3238,7 @@ precacheAndRoute([{'revision':null,'url':'/_next/static/chunks/13.73b29934949ab0
 
 // @ts-ignore
 try {
-    self['workbox:strategies:6.0.2'] && _();
+    self['workbox:strategies:6.1.0'] && _();
 }
 catch (e) { }
 
@@ -3186,7 +3252,7 @@ catch (e) { }
 
 // @ts-ignore
 try {
-    self['workbox:routing:6.0.2'] && _();
+    self['workbox:routing:6.1.0'] && _();
 }
 catch (e) { }
 
@@ -3200,7 +3266,7 @@ catch (e) { }
 
 // @ts-ignore
 try {
-    self['workbox:core:6.0.2'] && _();
+    self['workbox:core:6.1.0'] && _();
 }
 catch (e) { }
 
@@ -3214,7 +3280,7 @@ catch (e) { }
 
 // @ts-ignore
 try {
-    self['workbox:precaching:6.0.2'] && _();
+    self['workbox:precaching:6.1.0'] && _();
 }
 catch (e) { }
 
