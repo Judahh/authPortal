@@ -73,6 +73,8 @@ const Layout = ({ language, children, ...rest }) => {
       case darkTheme:
         setCurrentTheme(lightTheme);
         break;
+      default:
+        break;
     }
   };
 

@@ -19,7 +19,7 @@ const Scroll = () => {
   const onScroll = () => {
     const els: number[] = [];
     const hrefs: any[] = [];
-    const mapS: any = (map.sections as unknown) as Array<any>;
+    const mapS: any = (map.sections as unknown) as any[];
     for (const key in mapS) {
       const element = document.getElementById(key);
       if (

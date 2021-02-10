@@ -1,3 +1,4 @@
+// file deepcode ignore object-literal-shorthand: argh
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
 import { default as gTagConfig } from '../config/gTag.json';
