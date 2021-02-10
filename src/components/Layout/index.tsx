@@ -54,6 +54,8 @@ const Layout = ({ language, children, ...rest }) => {
       case langBR:
         setCurrentLanguage(langEN);
         break;
+      default:
+        break;
     }
     return currentLanguage;
   };

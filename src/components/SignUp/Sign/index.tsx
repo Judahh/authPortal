@@ -1,3 +1,4 @@
+// file deepcode ignore object-literal-shorthand: argh
 import React, { useContext, useState, useRef, useEffect } from 'react';
 import { Container } from '../../Container';
 import LanguageContext from '../../../language/context';

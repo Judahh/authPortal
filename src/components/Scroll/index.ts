@@ -1,3 +1,4 @@
+// file deepcode ignore no-any: any needed
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // eslint-disable-next-line no-unused-vars
 import { useEffect } from 'react';
@@ -16,8 +17,8 @@ const Scroll = () => {
     return lowest;
   };
   const onScroll = () => {
-    const els: Array<number> = [];
-    const hrefs: Array<any> = [];
+    const els: number[] = [];
+    const hrefs: any[] = [];
     const mapS: any = (map.sections as unknown) as Array<any>;
     for (const key in mapS) {
       const element = document.getElementById(key);

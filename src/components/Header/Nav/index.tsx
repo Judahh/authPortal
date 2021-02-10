@@ -1,3 +1,4 @@
+// file deepcode ignore no-any: any needed
 import React, { useContext } from 'react';
 import LanguageContext from '../../../language/context';
 import { NavWrapper, NavHolder, NavList } from './styles';
