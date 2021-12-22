@@ -42,7 +42,7 @@
     "react-icons": "latest",
     "react-reveal": "latest",
     "styled-components": "latest",
-    "workbox-precaching": "latest",
+    "workbox-precaching": "6.4.1",
     "workbox-window": "latest",
     "webpack": "^4.46.0"
   },
