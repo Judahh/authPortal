@@ -41,7 +41,7 @@
     "react-google-login": "latest",
     "react-icons": "latest",
     "react-reveal": "latest",
-    "styled-components": "latest",
+    "styled-components": "5.3.3",
     "workbox-precaching": "latest",
     "workbox-window": "latest",
     "webpack": "^4.46.0"
