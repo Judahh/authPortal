@@ -43,7 +43,7 @@
     "react-reveal": "latest",
     "styled-components": "latest",
     "workbox-precaching": "latest",
-    "workbox-window": "latest",
+    "workbox-window": "6.4.1",
     "webpack": "^4.46.0"
   },
   "devDependencies": {
