@@ -31,8 +31,8 @@
     "coveralls": "latest",
     "detect-browser-language": "latest",
     "google-auth-library": "latest",
-    "next": "latest",
-    "next-with-workbox": "latest",
+    "next": "10.2.0",
+    "next-with-workbox": "3.0.0",
     "nprogress": "latest",
     "polished": "latest",
     "react": "latest",
@@ -44,7 +44,7 @@
     "styled-components": "latest",
     "workbox-precaching": "latest",
     "workbox-window": "latest",
-    "webpack": "^4.46.0"
+    "webpack": "^5.0.0"
   },
   "devDependencies": {
     "@babel/preset-env": "latest",
