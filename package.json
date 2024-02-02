@@ -32,7 +32,7 @@
     "detect-browser-language": "latest",
     "google-auth-library": "latest",
     "next": "latest",
-    "next-with-workbox": "latest",
+    "next-with-workbox": "3.0.0",
     "nprogress": "latest",
     "polished": "latest",
     "react": "latest",
